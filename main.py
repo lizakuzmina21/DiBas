@@ -11,6 +11,7 @@ import time
 import os
 from PIL import Image
 from tempfile import TemporaryDirectory
+import wandb
 
 # Data augmentation and normalization for training
 # Just normalization for validation
@@ -71,6 +72,7 @@ def train_model(model, dataloaders, device, dataset_sizes, criterion, optimizer,
             epoch_acc = running_corrects.double() / dataset_sizes[phase]
 
             print(f'{phase} Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f}')
+            wandb.log({f"{phase}_accuracy": epoch_acc, f"{phase}_loss": epoch_loss})
 
             # deep copy the model
             if phase == 'test' and epoch_acc > best_acc:
@@ -90,6 +92,28 @@ def train_model(model, dataloaders, device, dataset_sizes, criterion, optimizer,
 
 
 if __name__=='__main__':
+    wandb.login()
+
+    num_epoch = 10
+    lr = 0.001
+    momentum = 0.9
+    step_size = 7
+    gamma = 0.1
+    net = 'Resnet18'
+
+    wandb.init(
+        project="DIBAS",
+
+        # track hyperparameters and run metadata
+        config={
+            "learning_rate": lr,
+            "architecture": net,
+            "epochs": num_epoch,
+            "momentum": momentum,
+            "step_size": step_size,
+            "gamma": gamma,
+        }
+    )
     from multiprocessing import freeze_support
     freeze_support()
     data_transforms = {
@@ -130,10 +154,38 @@ if __name__=='__main__':
     criterion = nn.CrossEntropyLoss()
 
     # Observe that all parameters are being optimized
-    optimizer_ft = optim.SGD(model_ft.parameters(), lr=0.001, momentum=0.9)
+    optimizer_ft = optim.SGD(model_ft.parameters(), lr=lr, momentum=momentum)
 
     # Decay LR by a factor of 0.1 every 7 epochs
-    exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=7, gamma=0.1)
+    exp_lr_scheduler = lr_scheduler.StepLR(optimizer_ft, step_size=step_size, gamma=gamma)
 
     model_ft = train_model(model_ft, dataloaders, device, dataset_sizes, criterion, optimizer_ft, exp_lr_scheduler,
-                           num_epochs=25)
+                           num_epochs=num_epoch)
+
+    from sklearn.metrics import confusion_matrix
+    import seaborn as sn
+    import pandas as pd
+
+    y_pred = []
+    y_true = []
+
+    # iterate over test data
+    for inputs, labels in dataloaders['test']:
+        output = model_ft(inputs.to(device))  # Feed Network
+
+        output = (torch.max(torch.exp(output), 1)[1]).data.cpu().numpy()
+        y_pred.extend(output)  # Save Prediction
+
+        labels = labels.data.cpu().numpy()
+        y_true.extend(labels)  # Save Truth
+
+    # Build confusion matrix
+    cf_matrix = confusion_matrix(y_true, y_pred)
+    df_cm = pd.DataFrame(cf_matrix / np.sum(cf_matrix, axis=1)[:, None], index=[i for i in class_names],
+                         columns=[i for i in class_names])
+    plt.figure(figsize=(12, 7))
+    sn.heatmap(df_cm, annot=True)
+    plt.savefig('output.png')
+
+    wandb.log({"CM": wandb.Image("output.png")})
+    wandb.finish()
